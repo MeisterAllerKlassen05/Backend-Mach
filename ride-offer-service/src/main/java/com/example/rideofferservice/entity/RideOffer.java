@@ -47,6 +47,12 @@ public class RideOffer {
     @Column(nullable = false, length = 20)
     private RideStatus status;
 
+    @Column(name = "created_at", updatable = false)
+    private LocalDateTime createdAt;
+
+    @Column(name = "fulfilled_at")
+    private LocalDateTime fulfilledAt;
+
     public enum RideStatus {
         OFFERED,
         FULFILLED,
@@ -92,4 +98,10 @@ public class RideOffer {
 
     public RideStatus getStatus() { return status; }
     public void setStatus(RideStatus status) { this.status = status; }
+
+    public LocalDateTime getCreatedAt() { return createdAt; }
+    public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+
+    public LocalDateTime getFulfilledAt() { return fulfilledAt; }
+    public void setFulfilledAt(LocalDateTime fulfilledAt) { this.fulfilledAt = fulfilledAt; }
 }

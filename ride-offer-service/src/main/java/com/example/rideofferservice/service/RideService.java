@@ -6,6 +6,8 @@ import com.example.rideofferservice.entity.RideOffer;
 import com.example.rideofferservice.repository.RideRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.connection.Connection;
+import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -23,6 +25,7 @@ public class RideService {
 
     private final RideRepository rideRepository;
     private final RabbitTemplate rabbitTemplate;
+    private final boolean rabbitmqAvailable;
 
     @Value("${app.rabbitmq.exchange.name}")
     private String exchangeName;
@@ -30,9 +33,32 @@ public class RideService {
     @Value("${app.rabbitmq.routing.key}")
     private String routingKey;
 
-    public RideService(RideRepository rideRepository, RabbitTemplate rabbitTemplate) {
+    public RideService(RideRepository rideRepository, CachingConnectionFactory connectionFactory) {
         this.rideRepository = rideRepository;
-        this.rabbitTemplate = rabbitTemplate;
+        
+        // Prüfe ob RabbitMQ erreichbar ist
+        boolean available = false;
+        try (Connection conn = connectionFactory.createConnection()) {
+            available = true;
+        } catch (Exception e) {
+            log.warn("RabbitMQ nicht verfügbar: {}", e.getMessage());
+        }
+        this.rabbitmqAvailable = available;
+        
+        // Erstelle einen null-safe RabbitTemplate falls RabbitMQ nicht da ist
+        RabbitTemplate template;
+        try {
+            if (available) {
+                template = new RabbitTemplate(connectionFactory);
+                template.setMessageConverter(new org.springframework.amqp.support.converter.Jackson2JsonMessageConverter());
+            } else {
+                template = null;
+            }
+        } catch (Exception e) {
+            log.warn("RabbitTemplate konnte nicht erstellt werden, Events werden ignoriert.");
+            template = null;
+        }
+        this.rabbitTemplate = template;
     }
 
     // --- Öffentliche (nicht authentifizierte) Methoden ---
@@ -108,31 +134,72 @@ public class RideService {
     @Transactional
     public RideResponse createRide(String username, CreateRideRequest request) {
         if (request.getAvailableSeats() == null || request.getAvailableSeats() <= 0) {
-            throw new IllegalArgumentException("Verfügbare Sitze müssen positiv sein!");
+            throw new IllegalArgumentException("Verfügbare Sitzplätze müssen größer als 0 sein.");
         }
 
-        //departureTime muss in der Vergangenheit liegen prüfen
-        if (request.getDepartureTime() != null && request.getDepartureTime().isBefore(LocalDateTime.now())) {
-            throw new IllegalArgumentException("Abfahrtszeit muss in der Zukunft liegen!");
-        }
-
-        RideOffer ride = new RideOffer(
-                username,
-                request.getStartLocation(),
-                request.getEndLocation(),
-                request.getDepartureTime(),
-                request.getAvailableSeats(),
-                request.getAdditionalInfo()
-        );
+        RideOffer ride = new RideOffer();
+        ride.setDriverUsername(username);
+        ride.setStartLocation(request.getStartLocation());
+        ride.setEndLocation(request.getEndLocation());
+        ride.setDepartureTime(request.getDepartureTime());
+        ride.setAvailableSeats(request.getAvailableSeats());
+        ride.setStatus(RideOffer.RideStatus.OFFERED);
+        ride.setCreatedAt(LocalDateTime.now());
 
         RideOffer saved = rideRepository.save(ride);
 
         // Sende RabbitMQ Event für neue Mitfahrt
         publishRideOfferedEvent(saved);
 
-        log.info("Neue Mitfahrt angeboten von {}: {} -> {}", username, request.getStartLocation(), request.getEndLocation());
+        log.info("Neue Mitfahrt erstellt von {}: {} -> {}", username, request.getStartLocation(), request.getEndLocation());
 
         return RideResponse.fromEntity(saved);
+    }
+
+    @Transactional
+    public RideResponse updateAvailableSeats(Long id, String username, int newSeats) {
+        if (newSeats <= 0) {
+            throw new IllegalArgumentException("Sitzplätze müssen größer als 0 sein.");
+        }
+
+        RideOffer ride = rideRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Mitfahrt nicht gefunden!"));
+
+        if (!ride.getDriverUsername().equals(username)) {
+            throw new SecurityException("Nur der Fahrer kann die Sitzplätze aktualisieren!");
+        }
+
+        if (ride.getStatus() == RideOffer.RideStatus.FULFILLED) {
+            throw new IllegalStateException("Eine abgeschlossene Mitfahrt kann nicht aktualisiert werden.");
+        }
+
+        ride.setAvailableSeats(newSeats);
+        RideOffer updated = rideRepository.save(ride);
+        log.info("Sitzplätze für Mitfahrt {} aktualisiert auf: {}", id, newSeats);
+
+        return RideResponse.fromEntity(updated);
+    }
+
+    @Transactional
+    public RideResponse fulfillRide(Long id, String passengerUsername) {
+        RideOffer ride = rideRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Mitfahrt nicht gefunden!"));
+
+        if (ride.getStatus() != RideOffer.RideStatus.OFFERED) {
+            throw new IllegalStateException("Nur eine angebotene Mitfahrt kann erfüllt werden.");
+        }
+
+        if (ride.getAvailableSeats() <= 0) {
+            throw new IllegalStateException("Keine freien Sitzplätze mehr verfügbar.");
+        }
+
+        ride.setStatus(RideOffer.RideStatus.FULFILLED);
+        ride.setFulfilledAt(LocalDateTime.now());
+        RideOffer updated = rideRepository.save(ride);
+
+        log.info("Mitfahrt {} wurde von {} erfüllt.", id, passengerUsername);
+
+        return RideResponse.fromEntity(updated);
     }
 
     @Transactional
@@ -144,7 +211,6 @@ public class RideService {
             throw new SecurityException("Nur der Fahrer kann die Mitfahrt stornieren!");
         }
 
-        // Prüfen ob bereits abgefahren
         if (ride.getStatus() == RideOffer.RideStatus.FULFILLED || ride.getStatus() == RideOffer.RideStatus.CANCELLED) {
             throw new IllegalStateException("Mitfahrt kann nicht mehr storniert werden.");
         }
@@ -181,27 +247,40 @@ public class RideService {
     // --- RabbitMQ Events ---
 
     private void publishRideOfferedEvent(RideOffer ride) {
-        RideOfferedEvent event = new RideOfferedEvent();
-        event.setRideId(ride.getId());
-        event.setDriverUsername(ride.getDriverUsername());
-        event.setStartLocation(ride.getStartLocation());
-        event.setEndLocation(ride.getEndLocation());
-        event.setDepartureTime(ride.getDepartureTime());
-        event.setAvailableSeats(ride.getAvailableSeats());
-        event.setTimestamp(LocalDateTime.now());
+        if (rabbitTemplate == null) {
+            log.warn("RabbitTemplate ist null — kann Event nicht senden. Ride gespeichert aber nicht publiziert: {}", ride.getId());
+            return;
+        }
+        try {
+            RideOfferedEvent event = new RideOfferedEvent();
+            event.setRideId(ride.getId());
+            event.setDriverUsername(ride.getDriverUsername());
+            event.setStartLocation(ride.getStartLocation());
+            event.setEndLocation(ride.getEndLocation());
+            event.setDepartureTime(ride.getDepartureTime());
+            event.setAvailableSeats(ride.getAvailableSeats());
+            event.setTimestamp(LocalDateTime.now());
 
-        rabbitTemplate.convertAndSend(exchangeName, routingKey, event);
-        log.info("RideOfferedEvent gesendet: {} -> {}", ride.getStartLocation(), ride.getEndLocation());
+            rabbitTemplate.convertAndSend(exchangeName, routingKey, event);
+            log.info("RideOfferedEvent gesendet: {} -> {}", ride.getStartLocation(), ride.getEndLocation());
+        } catch (Exception e) {
+            log.warn("Fehler beim Senden von RideOfferedEvent: {}. Ride wurde gespeichert aber Event ignoriert.", e.getMessage());
+        }
     }
 
     private void publishRideCancelledEvent(RideOffer ride) {
-        RideCancelledEvent event = new RideCancelledEvent();
-        event.setRideId(ride.getId());
-        event.setDriverUsername(ride.getDriverUsername());
-        event.setTimestamp(LocalDateTime.now());
+        if (rabbitTemplate == null) return;
+        try {
+            RideCancelledEvent event = new RideCancelledEvent();
+            event.setRideId(ride.getId());
+            event.setDriverUsername(ride.getDriverUsername());
+            event.setTimestamp(LocalDateTime.now());
 
-        rabbitTemplate.convertAndSend(exchangeName, routingKey, event);
-        log.info("RideCancelledEvent gesendet: {}", ride.getId());
+            rabbitTemplate.convertAndSend(exchangeName, routingKey, event);
+            log.info("RideCancelledEvent gesendet: {}", ride.getId());
+        } catch (Exception e) {
+            log.warn("Fehler beim Senden von RideCancelledEvent: {}. Ride wurde gespeichert.", e.getMessage());
+        }
     }
 
     // --- Event DTOs ---

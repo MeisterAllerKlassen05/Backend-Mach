@@ -2,12 +2,14 @@ package com.example.rideofferservice.security;
 
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.MalformedJwtException;
 import io.jsonwebtoken.security.Keys;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -66,8 +68,26 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     SecurityContextHolder.getContext().setAuthentication(authentication);
                     System.out.println("[JWT FILTER] Authentication set in context for: " + username);
                 }
+            } catch (MalformedJwtException e) {
+                System.out.println("[JWT FILTER] Invalid token (Malformed): " + e.getMessage());
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                response.getWriter().write("{\"error\": \"Invalid JWT token: " + e.getMessage() + "\"}");
+                return; // Stop filter chain — 401 returned to client
+            } catch (io.jsonwebtoken.ExpiredJwtException e) {
+                System.out.println("[JWT FILTER] Expired token: " + e.getMessage());
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                response.getWriter().write("{\"error\": \"JWT token expired: " + e.getMessage() + "\"}");
+                return; // Stop filter chain — 401 returned to client
+            } catch (io.jsonwebtoken.security.SignatureException e) {
+                System.out.println("[JWT FILTER] Signature mismatch: " + e.getMessage());
+                response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+                response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+                response.getWriter().write("{\"error\": \"JWT signature validation failed: " + e.getMessage() + "\"}");
+                return; // Stop filter chain — 401 returned to client
             } catch (Exception e) {
-                System.out.println("[JWT FILTER] Invalid token: " + e.getMessage());
+                System.out.println("[JWT FILTER] Unexpected error validating token: " + e.getMessage());
             }
         } else {
             System.out.println("[JWT FILTER] No Bearer token found");

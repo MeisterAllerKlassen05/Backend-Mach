@@ -1,6 +1,6 @@
 {
   "auth-service": {
-    "port": 8081,
+    "port": 8080,
     "host": "localhost",
     "description": "Identity-Service verwaltet User-Daten und JWT-Tokens. Gibt asynchrone Events via RabbitMQ ab."
   },
@@ -10,7 +10,7 @@
     "description": "Buchungs-Service. Verarbeitet Buchungen asynchron."
   },
   "ride-offer-service": {
-    "port": 8083,
+    "port": 8081,
     "host": "localhost",
     "description": "Mitfahranzeigen-Service. Angebotene Mitfahrten über RabbitMQ verfügbar machen."
   }
