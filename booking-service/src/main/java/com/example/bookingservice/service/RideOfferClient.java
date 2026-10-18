@@ -1,6 +1,6 @@
 package com.example.bookingservice.service;
 
-import com.example.bookingservice.dto.RideDetailsDto;
+import com.example.bookingservice.entity.Booking;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -8,6 +8,8 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
+
+import java.util.Map;
 
 @Service
 public class RideOfferClient {
@@ -20,24 +22,19 @@ public class RideOfferClient {
     private final RestTemplate restTemplate;
 
     public RideOfferClient() {
-        // Spring Boot 3.x registriert automatisch Jackson2HttpMessageConverter mit JavaTimeModule.
-        // Ein manuell erstellter RestTemplate ohne Custom-Config nutzt diese Standardkonverter.
         this.restTemplate = new RestTemplate();
     }
 
     /**
      * Hole eine einzelne Mitfahrt über den Ride-Offer-Service.
      */
-    public RideDetailsDto getRideById(Long rideId) {
+    public Map<String, Object> getRideById(Long rideId) {
         String url = rideOfferServiceUrl + "/api/rides/" + rideId;
         try {
-            ResponseEntity<RideDetailsDto> response = restTemplate.exchange(
-                    url, HttpMethod.GET, null, RideDetailsDto.class);
-            
-            log.info("Erfolgreiche Abfrage von Ride {}.", rideId);
+            ResponseEntity<Map> response = restTemplate.exchange(
+                    url, HttpMethod.GET, null, Map.class);
             return response.getBody();
         } catch (HttpClientErrorException.NotFound e) {
-            log.warn("Ride {} nicht gefunden.", rideId);
             return null;
         } catch (Exception e) {
             log.error("Fehler beim Abruf der Mitfahrt {}: {}", rideId, e.getMessage());
@@ -51,7 +48,7 @@ public class RideOfferClient {
     public void notifyRideCancelled(Long rideId) {
         String url = rideOfferServiceUrl + "/api/rides/" + rideId + "/cancel";
         try {
-            restTemplate.patchForObject(url, null, RideDetailsDto.class);
+            restTemplate.patchForObject(url, null, Map.class);
             log.info("Ride {} storniert über Ride-Offer-Service", rideId);
         } catch (Exception e) {
             log.warn("Fehler beim Stornieren der Mitfahrt {}: {}", rideId, e.getMessage());

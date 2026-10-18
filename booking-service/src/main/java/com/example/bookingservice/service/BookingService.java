@@ -2,7 +2,6 @@ package com.example.bookingservice.service;
 
 import com.example.bookingservice.dto.BookingResponse;
 import com.example.bookingservice.dto.CreateBookingRequest;
-import com.example.bookingservice.dto.RideDetailsDto;
 import com.example.bookingservice.entity.Booking;
 import com.example.bookingservice.repository.BookingRepository;
 import org.slf4j.Logger;
@@ -12,7 +11,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -63,43 +61,43 @@ public class BookingService {
         this.rabbitTemplate = template;
     }
 
+    /**
+     * Neue Buchung erstellen.
+     */
     @Transactional
     public BookingResponse createBooking(String username, CreateBookingRequest request) {
+        // Validiere: Ride ID muss übergeben werden
         if (request.getRideId() == null) {
             throw new IllegalArgumentException("Ride ID is required");
         }
 
         Long rideId = request.getRideId();
 
-        // Hole die Ride-Details über den DTO-basierten Client
-        RideDetailsDto rideInfo = rideOfferClient.getRideById(rideId);
-        
+        // Prüfe ob die Mitfahrt existiert und noch verfügbar ist
+        Map<String, Object> rideInfo = rideOfferClient.getRideById(rideId);
         if (rideInfo == null) {
             throw new IllegalArgumentException("Mitfahrt nicht gefunden: " + rideId);
         }
 
-        // Status-Check
-        if (!"OFFERED".equals(rideInfo.getStatus())) {
-            throw new IllegalStateException("Die Mitfahrt ist nicht mehr verfügbar. Status: " + rideInfo.getStatus());
+        // Prüfe ob die Mitfahrt noch "OFFERED" ist
+        String status = (String) rideInfo.get("status");
+        if (!"OFFERED".equals(status)) {
+            throw new IllegalStateException("Die Mitfahrt ist nicht mehr verfügbar. Status: " + status);
         }
 
-        // Abfahrtszeit prüfen (String -> LocalDateTime Konvertierung)
-        try {
-            LocalDateTime departureTime = LocalDateTime.parse(rideInfo.getDepartureTime());
-            if (departureTime != null && departureTime.isBefore(LocalDateTime.now())) {
-                throw new IllegalStateException("Die Abfahrtszeit liegt bereits in der Vergangenheit.");
-            }
-        } catch (Exception e) {
-            throw new IllegalStateException("Fehler bei der Validierung des Datums: " + e.getMessage());
+        // Prüfe ob die Mitfahrt in der Vergangenheit liegt
+        java.time.LocalDateTime departureTime = (java.time.LocalDateTime) rideInfo.get("departureTime");
+        if (departureTime != null && departureTime.isBefore(java.time.LocalDateTime.now())) {
+            throw new IllegalStateException("Die Abfahrtszeit liegt bereits in der Vergangenheit.");
         }
 
-        // Check ob eine Buchung für diese Ride schon existiert
+        // Prüfe ob die Buchung schon existiert
         if (bookingRepository.existsByRideIdAndStatus(rideId, Booking.BookingStatus.CONFIRMED)) {
             throw new IllegalStateException("Es gibt bereits eine bestätigte Buchung für diese Mitfahrt.");
         }
 
-        // Plätze-Check
-        Integer availableSeats = rideInfo.getAvailableSeats();
+        // Prüfe ob genug Plätze frei sind
+        Integer availableSeats = (Integer) rideInfo.get("availableSeats");
         if (availableSeats != null && availableSeats <= 0) {
             throw new IllegalStateException("Keine freien Plätze mehr verfügbar für diese Mitfahrt.");
         }
@@ -111,13 +109,14 @@ public class BookingService {
         log.info("Neue Buchung {} erstellt für User {}, Ride {}", 
                 savedBooking.getId(), username, rideId);
 
+        // Sende RabbitMQ Event dass eine Buchung erstellt wurde
         if (rabbitTemplate != null) {
             try {
                 Map<String, Object> event = Map.of(
                     "bookingId", savedBooking.getId(),
                     "rideId", rideId,
                     "passengerUsername", username,
-                    "timestamp", LocalDateTime.now().toString()
+                    "timestamp", java.time.LocalDateTime.now().toString()
                 );
                 rabbitTemplate.convertAndSend(exchangeName, bookingRoutingKey + ".created", event);
             } catch (Exception e) {
@@ -128,6 +127,9 @@ public class BookingService {
         return BookingResponse.fromEntity(savedBooking);
     }
 
+    /**
+     * Alle Buchungen für eine Mitfahrt abrufen.
+     */
     @Transactional(readOnly = true)
     public List<BookingResponse> getBookingsForRide(Long rideId) {
         return bookingRepository.findByRideId(rideId)
@@ -136,6 +138,9 @@ public class BookingService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Alle Buchungen eines Passagiers abrufen.
+     */
     @Transactional(readOnly = true)
     public List<BookingResponse> getBookingsByPassenger(String username) {
         return bookingRepository.findByPassengerUsername(username)
@@ -144,6 +149,9 @@ public class BookingService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Buchung stornieren.
+     */
     @Transactional
     public void cancelBooking(Long bookingId, String username) {
         Booking booking = bookingRepository.findByIdAndPassengerUsername(bookingId, username)
@@ -156,13 +164,14 @@ public class BookingService {
         booking.setStatus(Booking.BookingStatus.CANCELLED);
         bookingRepository.save(booking);
 
+        // Sende Event zum Stornieren der Buchung über RabbitMQ
         if (rabbitTemplate != null) {
             try {
                 Map<String, Object> event = Map.of(
                     "bookingId", booking.getId(),
                     "rideId", booking.getRideId(),
                     "passengerUsername", booking.getPassengerUsername(),
-                    "timestamp", LocalDateTime.now().toString()
+                    "timestamp", java.time.LocalDateTime.now().toString()
                 );
                 rabbitTemplate.convertAndSend(exchangeName, bookingRoutingKey + ".cancelled", event);
             } catch (Exception e) {

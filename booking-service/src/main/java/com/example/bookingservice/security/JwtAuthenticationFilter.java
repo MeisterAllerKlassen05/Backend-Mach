@@ -63,6 +63,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     SecurityContextHolder.getContext().setAuthentication(authentication);
                 }
             } catch (Exception e) {
+                // Token invalid — just skip auth, let @PreAuthorize or other checks decide
+                // Do NOT return 401 here; Spring Security handles unauthenticated requests
             }
         }
 
